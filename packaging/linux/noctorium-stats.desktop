@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Noctorium Stats
+GenericName=Listening statistics
+Comment=Your Noctorium listening statistics
+Exec=noctorium-stats
+Icon=noctorium-stats
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=music;statistics;stats;listening;streak;noctorium;
+StartupWMClass=noctorium-stats

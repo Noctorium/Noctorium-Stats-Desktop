@@ -1,0 +1,63 @@
+[package]
+name = "noctorium-stats"
+version = "0.1.0"
+edition = "2021"
+# keyring's floor; eframe's is 1.85.
+rust-version = "1.88"
+description = "Your Noctorium listening statistics, on the desktop"
+license = "GPL-3.0-only"
+repository = "https://github.com/Noctorium/Noctorium-Stats-Desktop"
+publish = false
+default-run = "noctorium-stats"
+
+# One program over one library. The library is everything -- the service, the figures, the window -- so the
+# tests reach all of it, and the program is only what has to be a program: the console it does not have on
+# Windows, and the window being opened.
+[lib]
+name = "noctorium_stats"
+path = "src/lib.rs"
+
+[[bin]]
+name = "noctorium-stats"
+path = "src/main.rs"
+
+[dependencies]
+# The window. Immediate mode, which suits a dashboard: everything on screen is a function of the figures
+# last fetched, and the fetching happens on other threads without a widget tree to keep in step with it.
+# The same toolkit, version and trimming as the installer's window: its own fonts as a fallback, OpenGL,
+# both display servers on Linux, and the accessibility tree for screen readers. Left out are the web backend
+# and eframe's own persistence, which would write a window position somewhere nobody asked for.
+eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+# Blocking HTTP with rustls, as the installer has: a handful of small JSON requests, each on its own thread,
+# need no async runtime, and rustls means no OpenSSL to find on anybody's Linux.
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Days and hours on the listener's own clock: chrono asks the system for the zone, daylight saving included,
+# on every platform. Only the clock and the parsing -- no wasm bindings, no old time crate.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+# The sign-in, in the system's own store: Credential Manager on Windows, the Keychain on a Mac, the Secret
+# Service on Linux (over zbus, so no libdbus to build against).
+keyring = "4"
+# Where settings and the cached figures go, by each system's own convention.
+dirs = "6"
+# Already under egui's text rendering; used directly only to pick the regular and bold faces out of a Mac's
+# Helvetica Neue collection, whose faces are in no documented order.
+ttf-parser = "0.25"
+
+# A message box, for the one failure a window program on Windows otherwise could not report: no window.
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+# Decodes the mark at build time, so the binary carries pixels rather than a PNG decoder used once.
+png = "0.18.1"
+
+[dev-dependencies]
+# The off-screen pictures of the window are written as PNGs.
+png = "0.18.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

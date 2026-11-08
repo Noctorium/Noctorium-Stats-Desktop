@@ -1,6 +1,6 @@
 [package]
 name = "noctorium-stats"
-version = "0.25.2"
+version = "0.26.0"
 edition = "2021"
 # keyring's floor; eframe's is 1.85.
 rust-version = "1.88"

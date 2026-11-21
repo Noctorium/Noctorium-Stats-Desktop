@@ -42,6 +42,28 @@ pub struct Session {
     pub user: User,
 }
 
+/// A browser sign-in, as the service starts it: the code to show, the page to open, and the secret that collects
+/// the token once the listener has allowed it there.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStart {
+    pub code: String,
+    pub poll_token: String,
+    pub url: String,
+    #[serde(default = "ten_minutes")]
+    pub expires_in: u64,
+    #[serde(default = "three_seconds")]
+    pub interval: u64,
+}
+
+fn ten_minutes() -> u64 {
+    600
+}
+
+fn three_seconds() -> u64 {
+    3
+}
+
 /// Why something did not work, in a form the window can say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
@@ -173,6 +195,24 @@ impl Client {
         read(send(request.send_json(body), true)?)
     }
 
+    /// Starts signing in from a browser -- with Discord, GitHub, Telegram or email -- by a code.
+    pub fn start_device(&self) -> Result<DeviceStart, Problem> {
+        let request = self.agent.post(&format!("{}/api/auth/device", self.base));
+        read(send(request.send_json(serde_json::json!({})), true)?)
+    }
+
+    /// Asks once whether the browser sign-in has been allowed: `None` while it waits.
+    pub fn poll_device(&self, poll_token: &str) -> Result<Option<Session>, Problem> {
+        let request = self
+            .agent
+            .get(&format!("{}/api/auth/device/poll", self.base))
+            .query("token", poll_token);
+        match request.call() {
+            Ok(response) if response.status() == 202 => Ok(None),
+            result => read(send(result, true)?).map(Some),
+        }
+    }
+
     pub fn me(&self, token: &str) -> Result<User, Problem> {
         #[derive(Deserialize)]
         struct Me {
@@ -242,6 +282,21 @@ mod tests {
         assert!(stats_url(LIVE, Range::Year, 0, TOP).contains("range=365d&tz=0"));
         assert!(stats_url(LIVE, Range::Quarter, 330, TOP).contains("range=90d&tz=330"));
         assert!(stats_url(LIVE, Range::Month, 0, TOP).contains("range=30d"));
+    }
+
+    #[test]
+    fn a_browser_sign_in_reads_as_the_service_sends_it() {
+        let start: DeviceStart = serde_json::from_str(
+            r#"{"code":"ABCD-EFGH","pollToken":"p","url":"https://service.noctorium.xyz/device?code=ABCD-EFGH","expiresIn":600,"interval":3}"#,
+        )
+        .unwrap();
+        assert_eq!((start.code.as_str(), start.interval), ("ABCD-EFGH", 3));
+        // An account made with Discord may have no email: it comes back empty, and still reads.
+        let session: Session = serde_json::from_str(
+            r#"{"token":"t","user":{"id":9,"email":"","displayName":"Disco"}}"#,
+        )
+        .unwrap();
+        assert_eq!(session.user.display_name, "Disco");
     }
 
     #[test]

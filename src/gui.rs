@@ -21,8 +21,10 @@ use crate::update::{self, Newer};
 use chrono::{DateTime, Utc};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Held while the sign-in is saved or forgotten. Both happen on threads, and a sign-out followed quickly by
 /// a sign-in must not have the forgetting land after the saving.
@@ -92,6 +94,16 @@ impl Start {
     }
 }
 
+/// The switch that ends a browser sign-in's wait; one equals only itself.
+#[derive(Debug, Clone, Default)]
+pub struct Stop(Arc<AtomicBool>);
+
+impl PartialEq for Stop {
+    fn eq(&self, other: &Stop) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// Something to do away from the window.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
@@ -115,6 +127,9 @@ pub enum Job {
     },
     SignOut,
     CheckForUpdate,
+    BrowserStart,
+    /// Waits for the browser sign-in until it is allowed, lapses, or the switch is set.
+    BrowserWait(api::DeviceStart, Stop),
 }
 
 /// What a job sends back. Each carries the sign-in it was started under, so an answer that arrives after
@@ -124,6 +139,7 @@ enum Reply {
     Me(u64, Result<User, Problem>),
     Stats(u64, Range, Result<(Stats, DateTime<Utc>), Problem>),
     Newer(Option<Newer>),
+    BrowserCode(u64, Result<api::DeviceStart, Problem>),
 }
 
 /// How jobs are done: on threads, for real; or written down and left undone, for the tests, which then
@@ -153,6 +169,8 @@ pub struct SignInForm {
     pub problem: Option<String>,
     /// Why the form is showing, when it is not the person's own doing: a sign-in that ran out.
     pub notice: Option<String>,
+    /// A browser sign-in waiting to be allowed, and the switch that stops its wait.
+    pub browser: Option<Box<(api::DeviceStart, Stop)>>,
 }
 
 impl SignInForm {
@@ -165,6 +183,7 @@ impl SignInForm {
             busy: false,
             problem: None,
             notice,
+            browser: None,
         }
     }
 }
@@ -202,6 +221,8 @@ pub enum Action {
     Range(Range),
     Refresh,
     SignOut,
+    BrowserSignIn,
+    BrowserCancel,
 }
 
 pub struct App {
@@ -341,6 +362,39 @@ impl App {
                     None
                 }
                 Job::CheckForUpdate => Some(Reply::Newer(update::check(crate::version()))),
+                Job::BrowserStart => Some(Reply::BrowserCode(epoch, client.start_device())),
+                Job::BrowserWait(start, cancelled) => {
+                    let until = std::time::Instant::now() + Duration::from_secs(start.expires_in);
+                    let mut reply = Some(Reply::Session(
+                        epoch,
+                        Err(Problem::Refused(
+                            "The code expired. Start again for a new one.".into(),
+                        )),
+                    ));
+                    while std::time::Instant::now() < until {
+                        std::thread::sleep(Duration::from_secs(start.interval.clamp(1, 30)));
+                        if cancelled.0.load(Ordering::Relaxed) {
+                            reply = None;
+                            break;
+                        }
+                        match client.poll_device(&start.poll_token) {
+                            // Still waiting, or not reached this time: asked again.
+                            Ok(None) | Err(Problem::Offline | Problem::Server(_)) => {}
+                            Ok(Some(session)) => {
+                                reply = Some(Reply::Session(
+                                    epoch,
+                                    Ok(keep(&places, &service, session)),
+                                ));
+                                break;
+                            }
+                            Err(problem) => {
+                                reply = Some(Reply::Session(epoch, Err(problem)));
+                                break;
+                            }
+                        }
+                    }
+                    reply
+                }
             };
             if let Some(reply) = reply {
                 let _ = sender.send(reply);
@@ -406,6 +460,9 @@ impl App {
             match reply {
                 Reply::Newer(newer) => self.newer = newer,
                 Reply::Session(epoch, result) if epoch == self.epoch => self.signed_in(result),
+                Reply::BrowserCode(epoch, result) if epoch == self.epoch => {
+                    self.browser_code(result)
+                }
                 Reply::Me(epoch, result) if epoch == self.epoch => match result {
                     Ok(user) => {
                         self.settings.user = Some(user.clone());
@@ -432,6 +489,24 @@ impl App {
         }
     }
 
+    fn browser_code(&mut self, result: Result<api::DeviceStart, Problem>) {
+        let Screen::SignIn(form) = &mut self.screen else {
+            return;
+        };
+        form.busy = false;
+        match result {
+            Ok(start) => {
+                let cancelled = Stop::default();
+                form.browser = Some(Box::new((start.clone(), cancelled.clone())));
+                if let Effects::Threads { ctx, .. } = &self.effects {
+                    ctx.open_url(egui::OpenUrl::new_tab(&start.url));
+                }
+                self.run(Job::BrowserWait(start, cancelled));
+            }
+            Err(problem) => form.problem = Some(problem.message()),
+        }
+    }
+
     fn signed_in(&mut self, result: Result<(Session, Option<String>), Problem>) {
         match result {
             Ok((session, kept_note)) => {
@@ -442,6 +517,7 @@ impl App {
             Err(problem) => {
                 if let Screen::SignIn(form) = &mut self.screen {
                     form.busy = false;
+                    form.browser = None;
                     form.problem = Some(problem.message());
                 }
             }
@@ -533,6 +609,25 @@ impl App {
                 }
             }
             Action::SignOut => self.sign_out(None),
+            Action::BrowserSignIn => {
+                let Screen::SignIn(form) = &mut self.screen else {
+                    return;
+                };
+                if form.busy || form.browser.is_some() {
+                    return;
+                }
+                form.busy = true;
+                form.problem = None;
+                self.run(Job::BrowserStart);
+            }
+            Action::BrowserCancel => {
+                if let Screen::SignIn(form) = &mut self.screen {
+                    if let Some(waiting) = form.browser.take() {
+                        let (_, cancelled) = *waiting;
+                        cancelled.0.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
         }
     }
 

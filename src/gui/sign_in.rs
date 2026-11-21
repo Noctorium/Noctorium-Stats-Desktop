@@ -229,6 +229,40 @@ fn form_body(ui: &mut Ui, form: &mut SignInForm, actions: &mut Vec<Action>) {
         });
     }
 
+    ui.add_space(14.0);
+    match form.browser.as_deref() {
+        None => {
+            if theme::secondary(ui, "Sign in with Discord, Telegram or GitHub").clicked()
+                && !form.busy
+            {
+                actions.push(Action::BrowserSignIn);
+            }
+        }
+        Some((start, _)) => {
+            ui.label(
+                RichText::new("Allow Noctorium Stats in your browser. Check it shows this code:")
+                    .font(theme::regular(13.0))
+                    .color(SUBTEXT),
+            );
+            ui.label(
+                RichText::new(&start.code)
+                    .font(theme::bold(26.0))
+                    .color(TEXT),
+            );
+            ui.label(
+                RichText::new("Waiting for you to allow it…")
+                    .font(theme::regular(12.5))
+                    .color(FAINT),
+            );
+            ui.horizontal(|ui| {
+                theme::link(ui, "Open in browser", &start.url);
+                if theme::secondary(ui, "Cancel").clicked() {
+                    actions.push(Action::BrowserCancel);
+                }
+            });
+        }
+    }
+
     if form.mode == Mode::Create {
         ui.add_space(12.0);
         ui.label(

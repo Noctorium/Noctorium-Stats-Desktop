@@ -195,7 +195,7 @@ impl Client {
         read(send(request.send_json(body), true)?)
     }
 
-    /// Starts signing in from a browser -- with Discord, GitHub, Telegram or email -- by a code.
+    /// Starts signing in from a browser -- with Discord, Telegram or email -- by a code.
     pub fn start_device(&self) -> Result<DeviceStart, Problem> {
         let request = self.agent.post(&format!("{}/api/auth/device", self.base));
         read(send(request.send_json(serde_json::json!({})), true)?)

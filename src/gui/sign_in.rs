@@ -232,9 +232,7 @@ fn form_body(ui: &mut Ui, form: &mut SignInForm, actions: &mut Vec<Action>) {
     ui.add_space(14.0);
     match form.browser.as_deref() {
         None => {
-            if theme::secondary(ui, "Sign in with Discord, Telegram or GitHub").clicked()
-                && !form.busy
-            {
+            if theme::secondary(ui, "Sign in with Discord or Telegram").clicked() && !form.busy {
                 actions.push(Action::BrowserSignIn);
             }
         }

@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Where the service lives unless told otherwise.
-pub const LIVE: &str = "https://noctorium-service.vercel.app";
+pub const LIVE: &str = "https://stats.noctorium.xyz";
+
+/// Signing in and the account: its own server since 0.39. Used whenever the statistics are the live ones.
+pub const ACCOUNT_LIVE: &str = "https://account.noctorium.xyz";
 
 /// The service's address: `NOCTORIUM_SERVICE_URL` when it is set, as the player reads it, for a preview
 /// deployment, a service of one's own or a copy running on this machine; the live one otherwise.
@@ -79,6 +82,59 @@ pub enum Problem {
     Server(u16),
     /// The service answered, but with something this version cannot read.
     Unreadable,
+    /// The password was right, and the account's two-step verification asks for a code before the token.
+    Verify(Challenge),
+}
+
+/// Two-step verification, asked for after the password: the ways the account can be verified ("totp" for an
+/// authenticator app, "telegram" for a code the login bot sends), whether strict mode needs every one of them, what is
+/// proved already, and the service's words about the last try.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Challenge {
+    pub ticket: String,
+    pub methods: Vec<String>,
+    pub strict: bool,
+    pub done: Vec<String>,
+    pub message: Option<String>,
+}
+
+impl Challenge {
+    /// What is still to be given: in strict mode every way not yet proved, otherwise any one of them.
+    pub fn still_needed(&self) -> Vec<String> {
+        if self.strict {
+            self.methods
+                .iter()
+                .filter(|m| !self.done.contains(m))
+                .cloned()
+                .collect()
+        } else {
+            self.methods.clone()
+        }
+    }
+
+    fn from_body(body: &str) -> Option<Challenge> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        let list = |name: &str| -> Vec<String> {
+            v[name]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Some(Challenge {
+            ticket: v["challenge"]
+                .as_str()
+                .filter(|t| !t.is_empty())?
+                .to_string(),
+            methods: list("methods"),
+            strict: v["strict"].as_bool() == Some(true),
+            done: list("done"),
+            message: v["error"].as_str().map(String::from),
+        })
+    }
 }
 
 impl Problem {
@@ -86,6 +142,7 @@ impl Problem {
         match self {
             Problem::SignedOut => "Your sign-in has run out. Sign in again to see your statistics.".into(),
             Problem::Throttled(words) | Problem::Refused(words) => words.clone(),
+            Problem::Verify(asked) => asked.message.clone().unwrap_or_else(|| "Enter a code to finish signing in.".into()),
             Problem::Offline => {
                 "The Noctorium service could not be reached. Check the connection, then try again.".into()
             }
@@ -149,6 +206,8 @@ pub fn stats_url(base: &str, range: Range, tz: i32, limit: u32) -> String {
 #[derive(Clone)]
 pub struct Client {
     base: String,
+    /// Where sign-in is asked: the account server with the live statistics, or [base] for a server of one's own.
+    account: String,
     agent: ureq::Agent,
 }
 
@@ -165,8 +224,15 @@ impl Client {
                 std::env::consts::OS
             ))
             .build();
+        let base = base.trim_end_matches('/').to_string();
+        let account = if base == LIVE {
+            ACCOUNT_LIVE.to_string()
+        } else {
+            base.clone()
+        };
         Client {
-            base: base.trim_end_matches('/').to_string(),
+            base,
+            account,
             agent,
         }
     }
@@ -177,8 +243,47 @@ impl Client {
 
     pub fn sign_in(&self, email: &str, password: &str) -> Result<Session, Problem> {
         let body = serde_json::json!({ "email": email.trim(), "password": password });
-        let request = self.agent.post(&format!("{}/api/auth/login", self.base));
+        let request = self.agent.post(&format!("{}/api/auth/login", self.account));
+        // The first answer's words are for apps too old to ask for a code: not shown here.
+        read(send(request.send_json(body), true).map_err(|p| match p {
+            Problem::Verify(asked) => Problem::Verify(Challenge {
+                message: None,
+                ..asked
+            }),
+            other => other,
+        })?)
+    }
+
+    /// The codes for [asked]'s sign-in; whichever are given count.
+    pub fn verify(
+        &self,
+        asked: &Challenge,
+        totp: &str,
+        telegram: &str,
+        backup: &str,
+    ) -> Result<Session, Problem> {
+        let mut body = serde_json::json!({ "challenge": asked.ticket });
+        for (name, code) in [("totp", totp), ("telegram", telegram), ("backup", backup)] {
+            if !code.trim().is_empty() {
+                body[name] = code.trim().into();
+            }
+        }
+        let request = self
+            .agent
+            .post(&format!("{}/api/auth/challenge/verify", self.account));
         read(send(request.send_json(body), true)?)
+    }
+
+    /// Asks the login bot to send [asked]'s code on Telegram.
+    pub fn send_telegram_code(&self, asked: &Challenge) -> Result<(), Problem> {
+        let request = self
+            .agent
+            .post(&format!("{}/api/auth/challenge/telegram", self.account));
+        send(
+            request.send_json(serde_json::json!({ "challenge": asked.ticket })),
+            true,
+        )
+        .map(|_| ())
     }
 
     pub fn sign_up(
@@ -191,13 +296,17 @@ impl Client {
         if !display_name.trim().is_empty() {
             body["displayName"] = display_name.trim().into();
         }
-        let request = self.agent.post(&format!("{}/api/auth/signup", self.base));
+        let request = self
+            .agent
+            .post(&format!("{}/api/auth/signup", self.account));
         read(send(request.send_json(body), true)?)
     }
 
     /// Starts signing in from a browser -- with Discord, Telegram or email -- by a code.
     pub fn start_device(&self) -> Result<DeviceStart, Problem> {
-        let request = self.agent.post(&format!("{}/api/auth/device", self.base));
+        let request = self
+            .agent
+            .post(&format!("{}/api/auth/device", self.account));
         read(send(request.send_json(serde_json::json!({})), true)?)
     }
 
@@ -205,7 +314,7 @@ impl Client {
     pub fn poll_device(&self, poll_token: &str) -> Result<Option<Session>, Problem> {
         let request = self
             .agent
-            .get(&format!("{}/api/auth/device/poll", self.base))
+            .get(&format!("{}/api/auth/device/poll", self.account))
             .query("token", poll_token);
         match request.call() {
             Ok(response) if response.status() == 202 => Ok(None),
@@ -220,7 +329,7 @@ impl Client {
         }
         let request = self
             .agent
-            .get(&format!("{}/api/auth/me", self.base))
+            .get(&format!("{}/api/auth/me", self.account))
             .set("Authorization", &bearer(token));
         read::<Me>(send(request.call(), false)?).map(|me| me.user)
     }
@@ -245,6 +354,9 @@ fn send(result: Result<ureq::Response, ureq::Error>, signing_in: bool) -> Result
         Ok(response) => response.into_string().map_err(|_| Problem::Offline),
         Err(ureq::Error::Status(status, response)) => {
             let body = response.into_string().unwrap_or_default();
+            if let Some(asked) = Challenge::from_body(&body) {
+                return Err(Problem::Verify(asked));
+            }
             Err(Problem::from_status(status, &body, signing_in))
         }
         Err(ureq::Error::Transport(transport)) => Err(Problem::from_transport(transport.kind())),
@@ -277,7 +389,7 @@ mod tests {
         );
         assert_eq!(
             stats_url(LIVE, Range::All, -300, 10),
-            "https://noctorium-service.vercel.app/api/stats?range=all&tz=-300&limit=10"
+            "https://stats.noctorium.xyz/api/stats?range=all&tz=-300&limit=10"
         );
         assert!(stats_url(LIVE, Range::Year, 0, TOP).contains("range=365d&tz=0"));
         assert!(stats_url(LIVE, Range::Quarter, 330, TOP).contains("range=90d&tz=330"));
@@ -297,6 +409,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session.user.display_name, "Disco");
+    }
+
+    #[test]
+    fn a_code_is_asked_for_and_strict_needs_what_is_not_done() {
+        let asked = Challenge::from_body(r#"{"error":"Strict mode is on: both codes are needed.","challenge":"t1","methods":["totp","telegram"],"strict":true,"done":["totp"]}"#).unwrap();
+        assert_eq!(asked.still_needed(), vec!["telegram".to_string()]);
+        assert_eq!(
+            Problem::Verify(asked).message(),
+            "Strict mode is on: both codes are needed."
+        );
+        assert!(Challenge::from_body(r#"{"error":"no"}"#).is_none());
+        assert_eq!(Client::new(LIVE).account, ACCOUNT_LIVE);
+        assert_eq!(
+            Client::new("http://localhost:3000").account,
+            "http://localhost:3000"
+        );
     }
 
     #[test]

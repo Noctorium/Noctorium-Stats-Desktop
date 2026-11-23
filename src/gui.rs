@@ -128,6 +128,8 @@ pub enum Job {
     SignOut,
     CheckForUpdate,
     BrowserStart,
+    Verify(Box<api::Challenge>, Codes),
+    TelegramCode(Box<api::Challenge>),
     /// Waits for the browser sign-in until it is allowed, lapses, or the switch is set.
     BrowserWait(api::DeviceStart, Stop),
 }
@@ -140,6 +142,8 @@ enum Reply {
     Stats(u64, Range, Result<(Stats, DateTime<Utc>), Problem>),
     Newer(Option<Newer>),
     BrowserCode(u64, Result<api::DeviceStart, Problem>),
+    /// What became of asking Telegram for a code: nothing to say, or why not.
+    Telegram(u64, Result<(), Problem>),
 }
 
 /// How jobs are done: on threads, for real; or written down and left undone, for the tests, which then
@@ -171,6 +175,19 @@ pub struct SignInForm {
     pub notice: Option<String>,
     /// A browser sign-in waiting to be allowed, and the switch that stops its wait.
     pub browser: Option<Box<(api::DeviceStart, Stop)>>,
+    /// After the password: two-step verification waiting for its codes, and what has been typed for them.
+    pub verify: Option<Box<api::Challenge>>,
+    pub codes: Box<Codes>,
+}
+
+/// The codes typed for two-step verification, and which way was picked this time.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Codes {
+    pub totp: String,
+    pub telegram: String,
+    pub backup: String,
+    pub use_backup: bool,
+    pub choice: Option<String>,
 }
 
 impl SignInForm {
@@ -184,6 +201,8 @@ impl SignInForm {
             problem: None,
             notice,
             browser: None,
+            verify: None,
+            codes: Box::default(),
         }
     }
 }
@@ -223,6 +242,9 @@ pub enum Action {
     SignOut,
     BrowserSignIn,
     BrowserCancel,
+    Verify,
+    TelegramCode,
+    VerifyCancel,
 }
 
 pub struct App {
@@ -363,6 +385,15 @@ impl App {
                 }
                 Job::CheckForUpdate => Some(Reply::Newer(update::check(crate::version()))),
                 Job::BrowserStart => Some(Reply::BrowserCode(epoch, client.start_device())),
+                Job::Verify(asked, codes) => Some(Reply::Session(
+                    epoch,
+                    client
+                        .verify(&asked, &codes.totp, &codes.telegram, &codes.backup)
+                        .map(|s| keep(&places, &service, s)),
+                )),
+                Job::TelegramCode(asked) => {
+                    Some(Reply::Telegram(epoch, client.send_telegram_code(&asked)))
+                }
                 Job::BrowserWait(start, cancelled) => {
                     let until = std::time::Instant::now() + Duration::from_secs(start.expires_in);
                     let mut reply = Some(Reply::Session(
@@ -463,6 +494,14 @@ impl App {
                 Reply::BrowserCode(epoch, result) if epoch == self.epoch => {
                     self.browser_code(result)
                 }
+                Reply::Telegram(epoch, result) if epoch == self.epoch => {
+                    if let Screen::SignIn(form) = &mut self.screen {
+                        form.problem = Some(match result {
+                            Ok(()) => "Sent. Check Telegram for the code.".into(),
+                            Err(problem) => problem.message(),
+                        });
+                    }
+                }
                 Reply::Me(epoch, result) if epoch == self.epoch => match result {
                     Ok(user) => {
                         self.settings.user = Some(user.clone());
@@ -514,10 +553,18 @@ impl App {
                 let _ = self.settings.save(&self.places);
                 self.open_board(session.token, Some(session.user), kept_note);
             }
+            Err(Problem::Verify(asked)) => {
+                if let Screen::SignIn(form) = &mut self.screen {
+                    form.busy = false;
+                    form.problem = asked.message.clone();
+                    form.verify = Some(Box::new(asked));
+                }
+            }
             Err(problem) => {
                 if let Screen::SignIn(form) = &mut self.screen {
                     form.busy = false;
                     form.browser = None;
+                    form.verify = None;
                     form.problem = Some(problem.message());
                 }
             }
@@ -619,6 +666,36 @@ impl App {
                 form.busy = true;
                 form.problem = None;
                 self.run(Job::BrowserStart);
+            }
+            Action::Verify => {
+                let Screen::SignIn(form) = &mut self.screen else {
+                    return;
+                };
+                let Some(asked) = form.verify.clone() else {
+                    return;
+                };
+                if form.busy {
+                    return;
+                }
+                form.busy = true;
+                form.problem = None;
+                let codes = std::mem::take(&mut form.codes);
+                form.codes.choice = codes.choice.clone();
+                self.run(Job::Verify(asked, *codes));
+            }
+            Action::TelegramCode => {
+                if let Screen::SignIn(form) = &self.screen {
+                    if let Some(asked) = form.verify.clone() {
+                        self.run(Job::TelegramCode(asked));
+                    }
+                }
+            }
+            Action::VerifyCancel => {
+                if let Screen::SignIn(form) = &mut self.screen {
+                    form.verify = None;
+                    *form.codes = Codes::default();
+                    form.problem = None;
+                }
             }
             Action::BrowserCancel => {
                 if let Screen::SignIn(form) = &mut self.screen {

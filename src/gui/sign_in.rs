@@ -113,6 +113,9 @@ pub fn show(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
 }
 
 fn form_body(ui: &mut Ui, form: &mut SignInForm, actions: &mut Vec<Action>) {
+    if form.verify.is_some() {
+        return verify_body(ui, form, actions);
+    }
     let inner = ui.available_width();
     let chosen = if form.mode == Mode::SignIn { 0 } else { 1 };
     if let Some(index) = theme::segmented(
@@ -335,4 +338,124 @@ pub fn about(ui: &mut Ui, service: &str, newer: Option<&crate::update::Newer>) {
             );
         });
     }
+}
+
+/// Two-step verification, after the password: a code from the authenticator app, one the login bot sends on Telegram,
+/// or a backup code. With both ways on, either one this time; in strict mode, both.
+fn verify_body(ui: &mut Ui, form: &mut SignInForm, actions: &mut Vec<Action>) {
+    let Some(asked) = form.verify.clone() else {
+        return;
+    };
+    ui.label(
+        RichText::new("Two-step verification")
+            .font(theme::bold(18.0))
+            .color(TEXT),
+    );
+    ui.label(
+        RichText::new(if asked.strict {
+            "Strict mode is on: this sign-in needs both codes."
+        } else {
+            "Enter a code to finish signing in."
+        })
+        .font(theme::regular(13.0))
+        .color(SUBTEXT),
+    );
+    ui.add_space(12.0);
+    let chosen = form
+        .codes
+        .choice
+        .clone()
+        .filter(|c| asked.methods.contains(c))
+        .unwrap_or_else(|| asked.methods.first().cloned().unwrap_or_default());
+    if !asked.strict && asked.methods.len() > 1 && !form.codes.use_backup {
+        let names: Vec<&str> = asked
+            .methods
+            .iter()
+            .map(|m| {
+                if m == "totp" {
+                    "Authenticator app"
+                } else {
+                    "Telegram"
+                }
+            })
+            .collect();
+        let index = asked.methods.iter().position(|m| *m == chosen).unwrap_or(0);
+        if let Some(picked) =
+            theme::segmented(ui, &names, index, (ui.available_width() - 8.0) / 2.0)
+        {
+            form.codes.choice = asked.methods.get(picked).cloned();
+        }
+        ui.add_space(12.0);
+    }
+    let wanted: Vec<String> = if form.codes.use_backup {
+        vec!["backup".into()]
+    } else if asked.strict {
+        asked.still_needed()
+    } else {
+        vec![chosen]
+    };
+    let mut submit = false;
+    for way in &wanted {
+        let (label, hint, text) = match way.as_str() {
+            "totp" => (
+                "Authenticator code",
+                "The code your app shows",
+                &mut form.codes.totp,
+            ),
+            "telegram" => (
+                "Telegram code",
+                "The code Telegram sent you",
+                &mut form.codes.telegram,
+            ),
+            _ => ("Backup code", "abcd-efgh", &mut form.codes.backup),
+        };
+        let field = field(ui, label, None, text, hint, false, !form.busy);
+        submit |= entered(ui, &field);
+        if way == "telegram" && theme::secondary(ui, "Send me a code on Telegram").clicked() {
+            actions.push(Action::TelegramCode);
+        }
+    }
+    ui.add_space(10.0);
+    let ready = wanted.iter().all(|w| match w.as_str() {
+        "totp" => !form.codes.totp.trim().is_empty(),
+        "telegram" => !form.codes.telegram.trim().is_empty(),
+        _ => !form.codes.backup.trim().is_empty(),
+    });
+    let button = theme::primary(
+        ui,
+        if form.busy { "Checking…" } else { "Continue" },
+        ui.available_width(),
+        true,
+    );
+    if (button.clicked() || submit) && ready {
+        actions.push(Action::Verify);
+    }
+    if let Some(problem) = &form.problem {
+        ui.add_space(10.0);
+        ui.label(RichText::new(problem).font(theme::regular(13.5)).color(
+            if problem.starts_with("Sent") {
+                SUBTEXT
+            } else {
+                ERROR
+            },
+        ));
+    }
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        if theme::secondary(
+            ui,
+            if form.codes.use_backup {
+                "Use my app or Telegram"
+            } else {
+                "Use a backup code"
+            },
+        )
+        .clicked()
+        {
+            form.codes.use_backup = !form.codes.use_backup;
+        }
+        if theme::secondary(ui, "Cancel").clicked() {
+            actions.push(Action::VerifyCancel);
+        }
+    });
 }

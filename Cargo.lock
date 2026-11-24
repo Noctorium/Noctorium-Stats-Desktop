@@ -1612,6 +1612,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1929,11 +1931,12 @@ dependencies = [
 
 [[package]]
 name = "noctorium-stats"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "chrono",
  "dirs",
  "eframe",
+ "image",
  "keyring",
  "png",
  "serde",

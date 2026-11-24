@@ -291,6 +291,7 @@ mod tests {
             id: 7,
             email: "robin@example.test".into(),
             display_name: "Robin Vale".into(),
+            avatar_url: None,
         }
     }
 

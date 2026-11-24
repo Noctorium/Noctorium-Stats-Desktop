@@ -36,6 +36,9 @@ pub struct User {
     pub id: u64,
     pub email: String,
     pub display_name: String,
+    /// The profile picture, when there is one. Missing from sessions saved before there were pictures.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// A sign-in: the token the service handed out, which lasts ninety days, and whose it is.
@@ -370,6 +373,16 @@ fn read<T: for<'de> Deserialize<'de>>(body: String) -> Result<T, Problem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_user_carries_the_picture_and_an_old_saved_one_reads_without() {
+        let with: User = serde_json::from_value(serde_json::json!({"id": 1, "email": "", "displayName": "A", "avatarUrl": "https://x/a"})).unwrap();
+        assert_eq!(with.avatar_url.as_deref(), Some("https://x/a"));
+        let old: User =
+            serde_json::from_value(serde_json::json!({"id": 1, "email": "", "displayName": "A"}))
+                .unwrap();
+        assert_eq!(old.avatar_url, None);
+    }
 
     #[test]
     fn the_service_is_the_live_one_unless_told() {

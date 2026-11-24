@@ -1,6 +1,6 @@
 [package]
 name = "noctorium-stats"
-version = "0.39.0"
+version = "0.40.0"
 edition = "2021"
 # keyring's floor; eframe's is 1.85.
 rust-version = "1.88"
@@ -44,6 +44,8 @@ dirs = "6"
 # Already under egui's text rendering; used directly only to pick the regular and bold faces out of a Mac's
 # Helvetica Neue collection, whose faces are in no documented order.
 ttf-parser = "0.25"
+# The listener's profile picture beside their name: the account keeps it as a JPEG or a PNG. As Noctorium Rust decodes covers.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # A message box, for the one failure a window program on Windows otherwise could not report: no window.
 [target."cfg(windows)".dependencies]

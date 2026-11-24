@@ -139,6 +139,16 @@ fn who(ui: &mut Ui, user: &User) {
         .truncate(),
     );
     let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), Sense::hover());
+    if let Some(picture) = user
+        .avatar_url
+        .as_deref()
+        .and_then(|url| avatar(ui.ctx(), url))
+    {
+        egui::Image::new(&picture)
+            .corner_radius(15)
+            .paint_at(ui, rect);
+        return;
+    }
     ui.painter()
         .circle_filled(rect.center(), 15.0, theme::accent_wash(0.25));
     let initial = name
@@ -153,6 +163,65 @@ fn who(ui: &mut Ui, user: &User) {
         theme::semibold(14.0),
         theme::ACCENT_BRIGHT,
     );
+}
+
+/// A profile picture on its way: fetched on a thread, then made a texture once, on the drawing thread.
+enum Fetch {
+    Waiting,
+    Got(egui::ColorImage),
+    Shown(egui::TextureHandle),
+    Failed,
+}
+
+/// The picture at [url], once it has arrived; until then (or if it never does) None, and the letter stands in.
+fn avatar(ctx: &egui::Context, url: &str) -> Option<egui::TextureHandle> {
+    use std::sync::{Arc, Mutex};
+    let id = egui::Id::new(("avatar", url));
+    let state = match ctx.data(|d| d.get_temp::<Arc<Mutex<Fetch>>>(id)) {
+        Some(state) => state,
+        None => {
+            let state = Arc::new(Mutex::new(Fetch::Waiting));
+            ctx.data_mut(|d| d.insert_temp(id, state.clone()));
+            let (slot, url, ctx) = (state.clone(), url.to_string(), ctx.clone());
+            std::thread::spawn(move || {
+                let got = fetch_picture(&url).map_or(Fetch::Failed, Fetch::Got);
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = got;
+                }
+                ctx.request_repaint();
+            });
+            state
+        }
+    };
+    let mut fetch = state.lock().ok()?;
+    if let Fetch::Got(image) = &*fetch {
+        *fetch = Fetch::Shown(ctx.load_texture(url, image.clone(), egui::TextureOptions::LINEAR));
+    }
+    match &*fetch {
+        Fetch::Shown(texture) => Some(texture.clone()),
+        Fetch::Waiting | Fetch::Got(_) | Fetch::Failed => None,
+    }
+}
+
+fn fetch_picture(url: &str) -> Option<egui::ColorImage> {
+    use std::io::Read;
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .call()
+        .ok()?;
+    let mut bytes = Vec::new();
+    // The account takes pictures under 512 KB; anything far larger is not one of its.
+    response
+        .into_reader()
+        .take(2 << 20)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        image.as_raw(),
+    ))
 }
 
 fn body(ui: &mut Ui, page: &Page, actions: &mut Vec<Action>) {
